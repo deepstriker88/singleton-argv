@@ -1,0 +1,44 @@
+{
+  "name": "singleton-argv",
+  "version": "0.1.0",
+  "description": "Reject repeated single-value options before a Node CLI acts on them",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    "import": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    },
+    "require": {
+      "types": "./src/index.d.cts",
+      "default": "./src/index.cjs"
+    }
+  },
+  "files": [
+    "src",
+    "SECURITY.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "type": "module",
+  "types": "./src/index.d.ts",
+  "funding": {
+    "type": "individual",
+    "url": "https://buymeacoffee.com/eztoolgo"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/deepstriker88/singleton-argv.git"
+  },
+  "bugs": {
+    "url": "https://github.com/deepstriker88/singleton-argv/issues"
+  },
+  "homepage": "https://github.com/deepstriker88/singleton-argv#readme",
+  "publishConfig": {
+    "access": "public"
+  }
+}

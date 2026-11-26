@@ -1,0 +1,128 @@
+name: Prepare and optionally stage reviewed npm release
+on:
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: "Exact reviewed main commit (40 lowercase hex characters)"
+        required: true
+        type: string
+      version:
+        description: "Exact stable package version, e.g. 0.1.0"
+        required: true
+        type: string
+      archive_sha:
+        description: "Exact SHA256 from a reviewed preparation run (required to stage)"
+        required: false
+        type: string
+      submit_stage:
+        description: "Submit inspected tarball to npm staging (not public approval)"
+        required: true
+        default: false
+        type: boolean
+permissions:
+  contents: read
+concurrency:
+  group: npm-reviewed-release-${{ github.repository }}
+  cancel-in-progress: false
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      archive_sha: ${{ steps.receipt.outputs.archive_sha }}
+    steps:
+      - name: Require the reviewed main revision
+        env:
+          EXPECTED_SHA: ${{ inputs.release_sha }}
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_SHA" = "$EXPECTED_SHA"
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$EXPECTED_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 1
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Use the reviewed npm CLI
+        run: npm install --global npm@12.2.3 --ignore-scripts --no-audit --no-fund
+      - name: Test, build, audit and install the exact package
+        env:
+          EXPECTED_SHA: ${{ inputs.release_sha }}
+          EXPECTED_VERSION: ${{ inputs.version }}
+        run: python3 scripts/prepare_npm_release.py --expected-sha "$EXPECTED_SHA" --version "$EXPECTED_VERSION" --output "$RUNNER_TEMP/release"
+      - id: receipt
+        name: Bind artifact to the prepare job
+        run: |
+          python3 - <<'PYCODE'
+          import json, os
+          from pathlib import Path
+          receipt = json.loads((Path(os.environ["RUNNER_TEMP"])/"release/release-receipt.json").read_text())
+          with open(os.environ["GITHUB_OUTPUT"],"a") as f:
+              print("archive_sha="+receipt["sha256"],file=f)
+          PYCODE
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: npm-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+          retention-days: 7
+  stage:
+    needs: prepare
+    if: ${{ inputs.submit_stage }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+      - name: Use the reviewed npm CLI
+        run: npm install --global npm@12.2.3 --ignore-scripts --no-audit --no-fund
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: npm-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release/
+      - name: Verify the exact staged artifact
+        env:
+          EXPECTED_SHA: ${{ inputs.release_sha }}
+          EXPECTED_VERSION: ${{ inputs.version }}
+          EXPECTED_ARCHIVE_SHA: ${{ needs.prepare.outputs.archive_sha }}
+          APPROVED_ARCHIVE_SHA: ${{ inputs.archive_sha }}
+          PACKAGE_NAME: singleton-argv
+        run: |
+          set -euo pipefail
+          python3 - <<'PYCODE'
+          import hashlib,json,os,re
+          from pathlib import Path
+          root=Path(os.environ["RUNNER_TEMP"])/"release"
+          name,version=os.environ["PACKAGE_NAME"],os.environ["EXPECTED_VERSION"]
+          if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+",version):
+              raise SystemExit("invalid version")
+          archive=root/(name+"-"+version+".tgz")
+          receipt=json.loads((root/"release-receipt.json").read_text())
+          assert receipt["source_sha"]==os.environ["EXPECTED_SHA"]
+          assert receipt["package"]==name and receipt["package_version"]==version
+          assert receipt["archive"]==archive.name and receipt["published"] is False
+          assert receipt["core_tests"]=="passed" and receipt["installed_cli_smoke"]=="passed"
+          assert archive.is_file() and not archive.is_symlink() and archive.stat().st_size<=262144
+          assert hashlib.sha256(archive.read_bytes()).hexdigest()==receipt["sha256"]==os.environ["EXPECTED_ARCHIVE_SHA"]==os.environ["APPROVED_ARCHIVE_SHA"]
+          assert {x.name for x in root.iterdir()}=={archive.name,"release-receipt.json"}
+          PYCODE
+      - name: Submit to npm staging only
+        env:
+          EXPECTED_VERSION: ${{ inputs.version }}
+          PACKAGE_NAME: singleton-argv
+        run: |
+          set -euo pipefail
+          npm stage publish "$RUNNER_TEMP/release/$PACKAGE_NAME-$EXPECTED_VERSION.tgz" --tag latest --access public --ignore-scripts
